@@ -5,6 +5,8 @@ import { buildEDL } from '../lib/edl.js';
 import { runExport } from '../media/runExport.js';
 import { useSubtitleStore } from '../store/useSubtitleStore.js';
 import { useCaptionPages } from '../store/useCaptionPages.js';
+import { useMediaStore } from '../store/useMediaStore.js';
+import { resolveBrolls } from '../lib/overlays.js';
 
 import * as I from './icons.jsx';
 
@@ -51,8 +53,21 @@ export default function ExportButton() {
       ? { pages: captionPages, styleId: sub.styleId, settings: { x: sub.x, y: sub.y, scale: sub.scale } }
       : null;
 
+    // B-roll: resolved to output times here; the worker gets the media files (not copied).
+    const ed = useEditorStore.getState();
+    const items = resolveBrolls(ed.brolls, ed.words, ed.removedRanges, ed.duration);
+    const library = useMediaStore.getState().media;
+    const media = {};
+    for (const it of items) {
+      const m = library[it.mediaId];
+      if (m) media[m.id] = { kind: m.kind, file: m.file, duration: Number.isFinite(m.duration) ? m.duration : null };
+    }
+    const overlays = items.length ? { items, media } : null;
+
     const { promise, cancel } = runExport(file, edl, {
+      overlays,
       captions,
+      frame: useEditorStore.getState().frame, // aspect ratio / crop / fit, as in the preview
       onProgress: (progress) => setJob({ phase: 'running', progress }),
     });
     cancelRef.current = cancel;
@@ -110,6 +125,7 @@ export default function ExportButton() {
                     {job.info.audioCodec ? ` + ${job.info.audioCodec}` : ' (no audio)'}
                   </li>
                   {job.info.subtitles && <li>Subtitles burned in</li>}
+                  {job.info.brolls > 0 && <li>{job.info.brolls} B-roll {job.info.brolls === 1 ? 'clip' : 'clips'}</li>}
                   <li>
                     Rendered in {job.seconds.toFixed(1)} s ({(job.outLength / job.seconds).toFixed(1)}× real time)
                   </li>

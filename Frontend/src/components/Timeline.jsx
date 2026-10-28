@@ -6,6 +6,9 @@ import { findRangeAt, normalize } from '../lib/ranges.js';
 import { snapCut } from '../lib/snap.js';
 import { formatClock, formatTick, moveRangeEdge, snapSeek, tickStep, wordBoundaries, nextBoundary, prevBoundary } from '../lib/timeline.js';
 import { gapCutTimes, splitTarget } from '../lib/transcript.js';
+import { resolveBrolls } from '../lib/overlays.js';
+import { useMediaStore } from '../store/useMediaStore.js';
+import { addBrollOverSelection, canAddBroll } from '../store/overlayActions.js';
 import { player } from '../media/player.js';
 import { deleteOrRestoreSelection, selectionIsRemoved } from './editActions.js';
 import * as I from './icons.jsx';
@@ -15,11 +18,12 @@ import { buildFillerCuts } from '../lib/fillers.js';
 const PAD = 16; // space before 0:00 and after the end
 const RULER_H = 28;
 const ROWS = {
-  caption: { top: 38, h: 30 },
-  video: { top: 76, h: 58 },
-  audio: { top: 142, h: 40 },
+  broll: { top: 34, h: 26 },
+  caption: { top: 66, h: 30 },
+  video: { top: 102, h: 58 },
+  audio: { top: 166, h: 40 },
 };
-const CONTENT_H = 190;
+const CONTENT_H = 212;
 const MAX_PPS = 900; // max zoom: px per second
 
 // Razor cursor (scissors), with crosshair as the fallback.
@@ -441,6 +445,7 @@ export default function Timeline() {
 
             {duration > 0 && (
               <>
+                <BrollTrack xOf={xOf} winA={winA} winB={winB} />
                 <CaptionTrack items={items} ranges={ranges} xOf={xOf} winA={winA} winB={winB} zoom={zoom} tool={tool} />
                 <VideoTrack
                   ranges={ranges}
@@ -490,11 +495,73 @@ function roundRect(ctx, x, y, w, h, r) {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * B-roll layer: one chip per overlay over the words it covers (source time, like every
+ * other row). Click to select it (opens the B-roll panel over the preview).
+ */
+function BrollTrack({ xOf, winA, winB }) {
+  const brolls = useEditorStore((s) => s.brolls);
+  const words = useEditorStore((s) => s.words);
+  const removedRanges = useEditorStore((s) => s.removedRanges);
+  const duration = useEditorStore((s) => s.duration);
+  const selectedId = useEditorStore((s) => s.selectedOverlayId);
+  const media = useMediaStore((s) => s.media);
+  const resolved = useMemo(() => resolveBrolls(brolls, words, removedRanges, duration), [brolls, words, removedRanges, duration]);
+  const { top, h } = ROWS.broll;
+
+  if (!resolved.length) {
+    return (
+      <div
+        className="pointer-events-none absolute flex items-center text-[11px] text-subtle"
+        style={{ left: xOf(0) + 8, top, height: h }}
+      >
+        Select words, then “Add B-roll” to show footage over them
+      </div>
+    );
+  }
+  return (
+    <>
+      {resolved.map((b) => {
+        const a = xOf(b.srcStart);
+        const z = xOf(b.srcEnd);
+        if (z < winA || a > winB) return null;
+        const m = media[b.mediaId];
+        const selected = b.id === selectedId;
+        return (
+          <button
+            key={b.id}
+            type="button"
+            tabIndex={-1}
+            title={`${m?.name ?? 'B-roll'}: ${b.mode === 'pip' ? 'picture-in-picture' : 'full screen'}`}
+            onPointerDown={(e) => {
+              if (e.button !== 0) return;
+              e.stopPropagation();
+              useEditorStore.getState().selectOverlay(b.id);
+              player.seek(b.srcStart);
+            }}
+            className={`absolute flex items-center gap-1 overflow-hidden whitespace-nowrap rounded-md px-1.5 text-left text-[11px] font-semibold text-white shadow transition-[box-shadow] ${
+              selected ? 'ring-2 ring-fg' : 'hover:brightness-110'
+            }`}
+            style={{ left: a + 1, width: Math.max(4, z - a - 2), top, height: h, background: 'linear-gradient(180deg, #8b5cf6, #6d28d9)' }}
+          >
+            <I.Film className="shrink-0 text-[12px]" />
+            <span className="truncate">{m?.name ?? 'B-roll'}</span>
+            {b.mode === 'pip' && <span className="ml-auto shrink-0 rounded bg-white/25 px-1 text-[9px]">PiP</span>}
+          </button>
+        );
+      })}
+    </>
+  );
+}
+
 function TrackLabels() {
   const row = 'absolute left-0 right-0 flex items-center gap-1.5 px-3 text-[11px] font-medium text-subtle';
   return (
     <div className="relative hidden w-[84px] shrink-0 border-r border-line bg-raised sm:block" style={{ height: CONTENT_H }}>
       <div className="absolute inset-x-0 top-0 border-b border-line-strong" style={{ height: RULER_H }} />
+      <div className={row} style={{ top: ROWS.broll.top, height: ROWS.broll.h }}>
+        <I.Film className="text-[13px]" /> B-roll
+      </div>
       <div className={row} style={{ top: ROWS.caption.top, height: ROWS.caption.h }}>
         <I.Text className="text-[13px]" /> Words
       </div>
@@ -752,6 +819,7 @@ function TimelineToolbar({ zoom, fitPps, zoomTo, follow, setFollow, tool, setToo
   const ready = useEditorStore((s) => s.status === 'ready');
   const span = useSelectionSpan();
   const restoring = useEditorStore((s) => selectionIsRemoved(s));
+  const canAddBrollNow = useEditorStore((s) => canAddBroll(s));
 
   // Zoom slider is logarithmic between fit and max.
   const lo = Math.log(fitPps);
@@ -774,6 +842,16 @@ function TimelineToolbar({ zoom, fitPps, zoomTo, follow, setFollow, tool, setToo
         danger={!restoring}
       >
         {restoring ? <I.Restore /> : <I.Trash />}
+      </IconBtn>
+      <IconBtn
+        label="Add B-roll over the selection (video or image)"
+        disabled={!canAddBrollNow}
+        onClick={() => addBrollOverSelection()}
+      >
+        <span className="relative">
+          <I.Film />
+          <I.Plus className="absolute -bottom-1 -right-1.5 text-[10px]" />
+        </span>
       </IconBtn>
       <IconBtn label="Clear selection (Esc)" disabled={!span} onClick={() => useEditorStore.getState().setSelection(null)}>
         <I.X />

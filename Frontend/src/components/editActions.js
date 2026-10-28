@@ -15,6 +15,11 @@ export function selectionIsRemoved(state) {
 
 export function deleteOrRestoreSelection() {
   const s = useEditorStore.getState();
+  // A selected B-roll takes priority: Delete removes the overlay, not the words under it.
+  if (s.selectedOverlayId) {
+    s.commitBrolls(s.brolls.filter((b) => b.id !== s.selectedOverlayId));
+    return;
+  }
   const span = getSelectionSpan(s);
   if (!span) return;
   if (selectionIsRemoved(s)) s.restoreRange(span.range);

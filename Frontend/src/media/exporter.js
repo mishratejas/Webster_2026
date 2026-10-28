@@ -31,17 +31,20 @@ import {
 } from 'mediabunny';
 import { drawCaption, findPageAt } from '../lib/captions.js';
 import { getCaptionStyle } from '../lib/captionStyles.js';
+import { drawFramed, outputSize } from '../lib/frame.js';
+import { createBrollRenderer } from './brollExport.js';
 
 const FADE_S = 0.005; // audio fade at every cut edge
-const even = (n) => Math.max(2, Math.round(n / 2) * 2); // H.264 needs even sizes
 
 /**
  * @param {{ file: File|Blob, edl: Array<{start:number,end:number}>, onProgress?: (p:number)=>void,
  *           captions?: { pages, styleId, settings } | null }} opts
  *   captions: burned-in subtitles, drawn with the same drawCaption() the preview uses.
+ *   frame: aspect ratio / crop / fit (lib/frame.js), drawn with the same drawFramed().
+ *   overlays: B-roll { items (resolved, output-timed), media: { id: { kind, file, duration } } }.
  * @returns {Promise<{ buffer: ArrayBuffer, videoCodec: string, audioCodec: string|null, width: number, height: number }>}
  */
-export async function exportVideo({ file, edl, onProgress, captions = null }) {
+export async function exportVideo({ file, edl, onProgress, captions = null, frame = null, overlays = null }) {
   if (!edl.length) throw new Error('Nothing to export: everything has been cut.');
 
   const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
@@ -49,8 +52,8 @@ export async function exportVideo({ file, edl, onProgress, captions = null }) {
   const audioTrack = await input.getPrimaryAudioTrack();
   if (!videoTrack) throw new Error('This file has no video track.');
 
-  const width = even(videoTrack.displayWidth);
-  const height = even(videoTrack.displayHeight);
+  // Output size follows the chosen aspect ratio (Original = the source size).
+  const { width, height } = outputSize(videoTrack.displayWidth, videoTrack.displayHeight, frame);
 
   const videoCodec = await getFirstEncodableVideoCodec(['avc', 'vp9', 'av1'], { width, height });
   if (!videoCodec) throw new Error("This browser can't encode video. Please use the latest Chrome or Edge.");
@@ -90,15 +93,20 @@ export async function exportVideo({ file, edl, onProgress, captions = null }) {
   };
 
   const captionStyle = captions?.pages?.length ? getCaptionStyle(captions.styleId) : null;
+  const broll = await createBrollRenderer(overlays);
 
-  /** One output frame at source time t: the video picture, then overlays on top. */
-  const drawFrame = (frameCanvas, t) => {
-    ctx.drawImage(frameCanvas, 0, 0, width, height);
+  /**
+   * One output frame: the framed video picture, then B-roll, then subtitles on top.
+   * t = source time (subtitles are timed in source seconds), T = output time (B-roll).
+   */
+  const drawFrame = async (frameCanvas, t, T) => {
+    drawFramed(ctx, frameCanvas, frameCanvas.width, frameCanvas.height, frame, width, height);
+    if (broll) await broll.draw(ctx, T, width, height);
     if (captionStyle) {
       const page = findPageAt(captions.pages, t);
       if (page) drawCaption(ctx, page, t, captionStyle, captions.settings, width, height);
     }
-    // Next: titles / b-roll get drawn here.
+    // Next: titles get drawn here.
   };
 
   const videoJob = async () => {
@@ -110,8 +118,9 @@ export async function exportVideo({ file, edl, onProgress, captions = null }) {
         const start = Math.max(frame.timestamp, k.start);
         const end = Math.min(frame.timestamp + (frame.duration || 1 / 30), k.end);
         if (end - start <= 1e-6) continue;
-        drawFrame(frame.canvas, start);
-        await videoSource.add(offset + (start - k.start), end - start);
+        const T = offset + (start - k.start); // this frame's time in the output
+        await drawFrame(frame.canvas, start, T);
+        await videoSource.add(T, end - start);
         videoDone = offset + (end - k.start);
         report();
       }
@@ -144,10 +153,22 @@ export async function exportVideo({ file, edl, onProgress, captions = null }) {
   };
 
   // Run both tracks together so the muxer can interleave them.
-  await Promise.all([videoJob(), audioJob()]);
+  try {
+    await Promise.all([videoJob(), audioJob()]);
+  } finally {
+    await broll?.close();
+  }
   await output.finalize();
 
-  return { buffer: output.target.buffer, videoCodec, audioCodec, width, height, subtitles: Boolean(captionStyle) };
+  return {
+    buffer: output.target.buffer,
+    videoCodec,
+    audioCodec,
+    width,
+    height,
+    subtitles: Boolean(captionStyle),
+    brolls: overlays?.items?.length ?? 0,
+  };
 }
 
 /** Cut an AudioSample down to the kept range k, fade the edges, and rebase its timestamp. */

@@ -3,14 +3,16 @@ import { useSubtitleStore } from '../store/useSubtitleStore.js';
 import { useCaptionPages } from '../store/useCaptionPages.js';
 import { drawCaption, findPageAt, SAMPLE_PAGE } from '../lib/captions.js';
 import { getCaptionStyle } from '../lib/captionStyles.js';
+import { useEditorStore } from '../store/useEditorStore.js';
+import { previewStage } from '../lib/frame.js';
 
 const HANDLE = 14; // px, the resize square at the caption's bottom-right corner
 const SNAP = 0.02; // snap to the horizontal centre within 2% of the width
 
 /**
  * Subtitles drawn over the preview with the exporter's own drawCaption(), inside the
- * area where the video picture actually is (object-contain letterboxing excluded), so
- * the preview matches the export at any window size.
+ * output frame (the aspect-ratio stage that PreviewCanvas draws), so the preview
+ * matches the export at any window size and any aspect ratio.
  *
  * Drag the caption to move it, drag the corner square to resize. Clicks anywhere else
  * go to `onBackgroundClick` (play / pause), like clicking the video.
@@ -51,11 +53,10 @@ export default function SubtitleCanvas({ videoRef, onBackgroundClick }) {
       const vw = v.videoWidth;
       const vh = v.videoHeight;
       if (!vw || !vh || !w || !h) return;
-      const s = Math.min(w / vw, h / vh);
-      const cw = vw * s;
-      const ch = vh * s;
-      const ox = (w - cw) / 2;
-      const oy = (h - ch) / 2;
+      // The output frame on screen (aspect ratio / crop / fit), same as PreviewCanvas, so
+      // subtitles are placed relative to the exported frame, exactly as the exporter does.
+      const stage = previewStage(w, h, vw, vh, useEditorStore.getState().frame);
+      const { x: ox, y: oy, w: cw, h: ch } = stage;
       view.current = { ox, oy, cw, ch };
 
       const sub = useSubtitleStore.getState();

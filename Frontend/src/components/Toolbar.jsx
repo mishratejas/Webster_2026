@@ -7,6 +7,7 @@ import ThemeToggle from './ThemeToggle.jsx';
 import * as I from './icons.jsx';
 import AccountMenu from '../account/AccountMenu.jsx';
 import { SaveProjectButton } from '../account/SaveControls.jsx';
+import { addBrollOverSelection, canAddBroll } from '../store/overlayActions.js';
 
 const btn =
   'inline-flex h-9 items-center gap-1.5 rounded-xl px-3 text-sm font-medium text-muted transition-all duration-150 hover:bg-hover hover:text-fg active:scale-95 disabled:pointer-events-none disabled:opacity-35';
@@ -52,6 +53,14 @@ export default function Toolbar() {
           title="Delete / restore selection (Del)"
         >
           {restoring ? <I.Restore /> : <I.Trash />} <span className="hidden md:inline">{restoring ? 'Restore' : 'Delete'}</span>
+        </button>
+        <button
+          className={btn}
+          disabled={!canAddBroll(s)}
+          onClick={() => addBrollOverSelection()}
+          title="Add B-roll (video or image) over the selected words"
+        >
+          <I.Film /> <span className="hidden md:inline">B-roll</span>
         </button>
       </div>
 

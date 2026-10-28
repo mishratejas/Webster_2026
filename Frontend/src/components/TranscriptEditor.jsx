@@ -147,6 +147,7 @@ export function useTranscriptShortcuts() {
         s.redo();
       } else if (e.key === 'Escape') {
         s.setSelection(null);
+        s.selectOverlay(null);
       } else if (e.key === ' ') {
         e.preventDefault();
         player.togglePlay();

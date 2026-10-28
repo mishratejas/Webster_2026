@@ -3,7 +3,7 @@
 /**
  * @returns {{ promise: Promise<{ blob: Blob, videoCodec, audioCodec, width, height }>, cancel: () => void }}
  */
-export function runExport(file, edl, { onProgress, captions = null } = {}) {
+export function runExport(file, edl, { onProgress, captions = null, frame = null, overlays = null } = {}) {
   const worker = new Worker(new URL('../workers/export.worker.js', import.meta.url), { type: 'module' });
   let rejectFn;
 
@@ -26,7 +26,7 @@ export function runExport(file, edl, { onProgress, captions = null } = {}) {
       reject(new Error(e.message || 'Export worker crashed'));
     };
     // Plain objects only: the EDL is copied, the File is shared without copying its bytes.
-    worker.postMessage({ type: 'export', file, edl: edl.map((k) => ({ start: k.start, end: k.end })), captions });
+    worker.postMessage({ type: 'export', file, edl: edl.map((k) => ({ start: k.start, end: k.end })), captions, frame, overlays });
   });
 
   const cancel = () => {

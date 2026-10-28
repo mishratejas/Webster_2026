@@ -9,6 +9,10 @@ import * as I from './icons.jsx';
 import SubtitleCanvas from './SubtitleCanvas.jsx';
 import SubtitlePanel from './SubtitlePanel.jsx';
 import { useSubtitleStore } from '../store/useSubtitleStore.js';
+import PreviewCanvas from './PreviewCanvas.jsx';
+import FormatPanel from './FormatPanel.jsx';
+import BrollPanel from './BrollPanel.jsx';
+import { ASPECTS } from '../lib/frame.js';
 
 /**
  * Preview: a <video> plus a requestAnimationFrame loop that
@@ -22,7 +26,10 @@ export default function VideoPreview() {
   const wrapRef = useRef(null);
   const videoUrl = useEditorStore((s) => s.videoUrl);
   const subtitlesOn = useSubtitleStore((s) => s.enabled);
-  const panelOpen = useSubtitleStore((s) => s.panelOpen);
+  const subtitlePanelOpen = useSubtitleStore((s) => s.panelOpen);
+  const [formatOpen, setFormatOpen] = useState(false);
+  const panelOpen = subtitlePanelOpen || formatOpen;
+  const aspect = useEditorStore((s) => s.frame.aspect);
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(1);
   const playing = usePlaying();
@@ -85,6 +92,8 @@ export default function VideoPreview() {
         onClick={() => player.togglePlay()}
         className="h-full max-h-full w-full cursor-pointer object-contain"
       />
+      {/* What you actually see: the video framed to the output aspect ratio (crop / fit). */}
+      <PreviewCanvas videoRef={videoRef} onClick={() => player.togglePlay()} />
 
       {/* Big play button when paused */}
       <button
@@ -101,6 +110,8 @@ export default function VideoPreview() {
       {/* Subtitles: same renderer as the export; drag to move, corner to resize. */}
       <SubtitleCanvas videoRef={videoRef} onBackgroundClick={() => player.togglePlay()} />
       <SubtitlePanel />
+      {formatOpen && <FormatPanel videoRef={videoRef} onClose={() => setFormatOpen(false)} />}
+      <BrollPanel />
 
       {/* Control bar */}
       <div
@@ -158,10 +169,27 @@ export default function VideoPreview() {
                 const s = useSubtitleStore.getState();
                 if (!s.enabled) s.update({ enabled: true });
                 s.setPanelOpen(!s.panelOpen);
+                setFormatOpen(false);
               }}
               active={panelOpen}
             >
               <span className="text-[13px] font-bold leading-none">Aa</span>
+            </CtrlBtn>
+            <CtrlBtn
+              label="Aspect ratio and framing"
+              onClick={() => {
+                setFormatOpen(!formatOpen);
+                useSubtitleStore.getState().setPanelOpen(false);
+              }}
+              active={formatOpen}
+            >
+              <span
+                className={`flex h-[15px] min-w-[30px] items-center justify-center rounded-[4px] border-[1.5px] px-[3px] text-[9px] font-bold leading-none ${
+                  aspect !== 'original' ? 'border-scarlet-400 bg-scarlet-400 text-white' : 'border-current'
+                }`}
+              >
+                {aspect === 'original' ? 'RATIO' : ASPECTS.find((a) => a.id === aspect)?.label}
+              </span>
             </CtrlBtn>
             <CtrlBtn label="Fullscreen" onClick={fullscreen}>
               <I.Expand />
