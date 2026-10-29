@@ -20,7 +20,7 @@ function Editor() {
   return (
     <div className="ambient flex h-full flex-col">
       <Toolbar />
-      <main className="grid min-h-0 flex-1 gap-4 overflow-y-auto p-4 lg:overflow-hidden lg:grid-cols-[minmax(0,1.55fr)_minmax(320px,1fr)]">
+      <main className="grid min-h-0 flex-1 gap-4 overflow-y-auto p-4 lg:overflow-hidden lg:grid-cols-[minmax(0,1.9fr)_minmax(300px,1fr)]">
         <section className="fade-up flex min-h-[520px] min-w-0 flex-col gap-4 lg:min-h-0">
           <VideoPreview />
           <StatusBar />

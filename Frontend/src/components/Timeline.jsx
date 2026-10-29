@@ -29,6 +29,31 @@ const ROWS = {
 };
 const CONTENT_H = 232;
 const MAX_PPS = 900; // max zoom: px per second
+// Visible height of the track area (the rows scroll vertically inside it). Resizable by
+// dragging the handle on top of the timeline; remembered per browser.
+const VIEW_H_KEY = 'scarlet.timelineH';
+const VIEW_H_DEFAULT = 176;
+const VIEW_H_MIN = RULER_H + 64;
+const VIEW_H_MAX = CONTENT_H + 14; // + room for the horizontal scrollbar
+const clampViewH = (h) => Math.min(VIEW_H_MAX, Math.max(VIEW_H_MIN, h));
+function loadViewH() {
+  try {
+    const v = Number(localStorage.getItem(VIEW_H_KEY));
+    return v > 0 ? clampViewH(v) : VIEW_H_DEFAULT;
+  } catch {
+    return VIEW_H_DEFAULT;
+  }
+}
+
+/** Size a canvas for its CSS size at the device pixel ratio (only when it changed). */
+function fitCanvas(cv, w, h, dpr) {
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.width = Math.round(w * dpr);
+    cv.height = Math.round(h * dpr);
+    cv.style.width = `${w}px`;
+    cv.style.height = `${h}px`;
+  }
+}
 
 // Razor cursor (scissors), with crosshair as the fallback.
 const RAZOR_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
@@ -57,6 +82,10 @@ export default function Timeline() {
   const scrollerRef = useRef(null);
   const contentRef = useRef(null);
   const canvasRef = useRef(null);
+  const rulerRef = useRef(null);
+  const labelsRef = useRef(null);
+  const headRef = useRef(null);
+  const [viewH, setViewH] = useState(loadViewH);
   const playheadRef = useRef(null);
   const hoverRef = useRef(null);
   const hoverLabelRef = useRef(null);
@@ -114,20 +143,22 @@ export default function Timeline() {
   const draw = useCallback(() => {
     const sc = scrollerRef.current;
     const cv = canvasRef.current;
-    if (!sc || !cv) return;
+    const rv = rulerRef.current;
+    if (!sc || !cv || !rv) return;
     const { xOf: X, tOf: T, zoom: Z, ranges: R, duration: D, peaks: P, fileName: name, proposed: FP } = live.current;
     const w = sc.clientWidth;
+    const vh = sc.clientHeight;
     const sl = sc.scrollLeft;
+    const st = sc.scrollTop;
     const dpr = window.devicePixelRatio || 1;
-    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(CONTENT_H * dpr)) {
-      cv.width = Math.round(w * dpr);
-      cv.height = Math.round(CONTENT_H * dpr);
-      cv.style.width = `${w}px`;
-      cv.style.height = `${CONTENT_H}px`;
-    }
-    const ctx = cv.getContext('2d');
+    // Two viewport-sized canvases, both sticky: the tracks (drawn in content coordinates,
+    // shifted by the vertical scroll) and the ruler on top, pinned while the rows scroll.
+    fitCanvas(cv, w, vh, dpr);
+    fitCanvas(rv, w, RULER_H, dpr);
+    rv.style.marginTop = `${-vh}px`; // overlay the ruler on the track canvas
+    let ctx = rv.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, CONTENT_H);
+    ctx.clearRect(0, 0, w, RULER_H);
 
     const css = getComputedStyle(document.documentElement);
     const col = (n) => css.getPropertyValue(n).trim();
@@ -164,16 +195,29 @@ export default function Timeline() {
       if (b < 0 || a > w) continue;
       ctx.fillRect(a, RULER_H - 3, Math.max(1, b - a), 3);
     }
-    // Proposed filler cuts: highlight band on the ruler plus a light wash over the tracks
+    // Proposed filler cuts: highlight band on the ruler...
     if (FP?.length) {
       ctx.fillStyle = col('--c-highlight');
       for (const r of FP) {
         const a = X(r.start) - sl;
         const b = X(r.end) - sl;
         if (b < 0 || a > w) continue;
-        ctx.globalAlpha = 1;
         ctx.fillRect(a, RULER_H - 6, Math.max(1.5, b - a), 3);
-        ctx.globalAlpha = 0.16;
+      }
+    }
+
+    // ---- tracks (content coordinates; the canvas follows the vertical scroll) ----
+    ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, -st * dpr);
+    ctx.clearRect(0, st, w, vh);
+    // ...plus a light wash over the tracks
+    if (FP?.length) {
+      ctx.fillStyle = col('--c-highlight');
+      ctx.globalAlpha = 0.16;
+      for (const r of FP) {
+        const a = X(r.start) - sl;
+        const b = X(r.end) - sl;
+        if (b < 0 || a > w) continue;
         ctx.fillRect(a, RULER_H, Math.max(1.5, b - a), CONTENT_H - RULER_H);
       }
       ctx.globalAlpha = 1;
@@ -233,11 +277,41 @@ export default function Timeline() {
 
   useEffect(() => {
     draw();
-  }, [draw, zoom, viewW, ranges, peaks, theme, duration, fileName, proposed]);
+  }, [draw, zoom, viewW, viewH, ranges, peaks, theme, duration, fileName, proposed]);
 
   const onScroll = () => {
+    const sc = scrollerRef.current;
     draw();
-    setScrollLeft(scrollerRef.current.scrollLeft);
+    setScrollLeft(sc.scrollLeft);
+    if (labelsRef.current) labelsRef.current.scrollTop = sc.scrollTop; // labels follow the rows
+  };
+
+  // ---- resize the track area by dragging the handle on top ----
+  const startResize = (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const el = e.currentTarget;
+    el.setPointerCapture(e.pointerId);
+    const y0 = e.clientY;
+    const h0 = viewH;
+    let last = h0;
+    const move = (ev) => {
+      last = clampViewH(h0 + (y0 - ev.clientY)); // drag up = taller timeline
+      setViewH(last);
+    };
+    const up = () => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      el.removeEventListener('pointercancel', up);
+      try {
+        localStorage.setItem(VIEW_H_KEY, String(Math.round(last)));
+      } catch {
+        // storage unavailable: the size just isn't remembered
+      }
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
   };
 
   // ---- playhead: follows the video every frame, no React re-render ----
@@ -249,6 +323,7 @@ export default function Timeline() {
       const x = X(t);
       if (playheadRef.current) playheadRef.current.style.transform = `translateX(${x}px)`;
       const sc = scrollerRef.current;
+      if (headRef.current && sc) headRef.current.style.transform = `translateY(${sc.scrollTop}px)`;
       const v = player.element;
       if (f && sc && v && !v.paused && !gesture.current) {
         const left = sc.scrollLeft;
@@ -285,6 +360,12 @@ export default function Timeline() {
   useEffect(() => {
     const sc = scrollerRef.current;
     const onWheel = (e) => {
+      if (e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        // Shift + wheel: scroll the rows vertically (plain wheel scrolls along the timeline).
+        e.preventDefault();
+        sc.scrollTop += e.deltaY || e.deltaX;
+        return;
+      }
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         const rect = sc.getBoundingClientRect();
@@ -332,6 +413,7 @@ export default function Timeline() {
       hoverLineRef.current.style.borderLeftStyle = razor && ok ? 'solid' : 'dashed';
     }
     if (hoverLabelRef.current) {
+      hoverLabelRef.current.style.top = `${(scrollerRef.current?.scrollTop ?? 0) + RULER_H + 4}px`;
       hoverLabelRef.current.textContent = !razor ? formatClock(t) : ok ? `Split ${formatClock(t)}` : "Words can't be split";
       hoverLabelRef.current.style.background = razor && ok ? 'var(--c-accent)' : '';
       hoverLabelRef.current.style.color = razor && ok ? '#fff' : '';
@@ -351,7 +433,7 @@ export default function Timeline() {
   const onPointerDown = (e) => {
     if (e.button !== 0 || status !== 'ready') return;
     const x = localX(e);
-    const y = e.clientY - contentRef.current.getBoundingClientRect().top;
+    const y = e.clientY - scrollerRef.current.getBoundingClientRect().top; // viewport y: the ruler is pinned
     const { words, gaps } = useEditorStore.getState();
     if (tool === 'razor' && y >= RULER_H) {
       // Same snapping as the hover guide; addSplit refuses anything outside a pause.
@@ -418,6 +500,16 @@ export default function Timeline() {
 
   return (
     <div className="panel fade-up flex shrink-0 flex-col overflow-hidden" style={{ animationDelay: '120ms' }}>
+      <div
+        className="group flex h-2.5 shrink-0 cursor-ns-resize touch-none items-center justify-center"
+        onPointerDown={startResize}
+        title="Drag to resize the timeline · Shift + scroll to see more tracks"
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize timeline"
+      >
+        <span className="h-1 w-10 rounded-full bg-line-strong transition-colors group-hover:bg-accent" />
+      </div>
       <TimelineToolbar
         zoom={zoom}
         fitPps={fitPps}
@@ -429,11 +521,12 @@ export default function Timeline() {
       />
 
       <div className="flex min-h-0 flex-1">
-        <TrackLabels />
+        <TrackLabels labelsRef={labelsRef} height={clampViewH(viewH)} />
         <div
           ref={scrollerRef}
           onScroll={onScroll}
-          className="relative min-w-0 flex-1 overflow-x-auto overflow-y-hidden bg-sunken/40"
+          className="relative min-w-0 flex-1 overflow-auto bg-sunken/40"
+          style={{ height: clampViewH(viewH) }}
         >
           <div
             ref={contentRef}
@@ -446,6 +539,7 @@ export default function Timeline() {
             onPointerLeave={hideHover}
           >
             <canvas ref={canvasRef} className="pointer-events-none sticky left-0 top-0 block" />
+            <canvas ref={rulerRef} className="pointer-events-none sticky left-0 top-0 z-[25] block" />
 
             {duration > 0 && (
               <>
@@ -477,14 +571,17 @@ export default function Timeline() {
               <div
                 ref={hoverLabelRef}
                 className="absolute -translate-x-1/2 rounded bg-fg px-1.5 py-0.5 font-mono text-[10px] font-medium text-canvas shadow"
-                style={{ top: CONTENT_H - 18 }}
+                style={{ top: RULER_H + 4 }}
               />
             </div>
 
             {/* Playhead */}
             <div ref={playheadRef} className="pointer-events-none absolute left-0 top-0 z-30 h-full will-change-transform">
               <div className="absolute -left-[1px] top-0 h-full w-[2px] bg-fg shadow-[0_0_0_1px_rgb(0_0_0/0.15)]" />
-              <div className="absolute -left-[7px] top-0.5 h-4 w-[14px] rounded-[4px] rounded-b-[7px] bg-fg shadow-md" />
+              <div
+                ref={headRef}
+                className="absolute -left-[7px] top-0.5 z-[1] h-4 w-[14px] rounded-[4px] rounded-b-[7px] bg-fg shadow-md"
+              />
             </div>
           </div>
         </div>
@@ -653,11 +750,12 @@ function BrollTrack({ xOf, winA, winB }) {
   );
 }
 
-function TrackLabels() {
+function TrackLabels({ labelsRef, height }) {
   const row = 'absolute left-0 right-0 flex items-center gap-1.5 px-3 text-[11px] font-medium text-subtle';
   return (
-    <div className="relative hidden w-[84px] shrink-0 border-r border-line bg-raised sm:block" style={{ height: CONTENT_H }}>
-      <div className="absolute inset-x-0 top-0 border-b border-line-strong" style={{ height: RULER_H }} />
+    <div ref={labelsRef} className="hidden w-[84px] shrink-0 overflow-hidden border-r border-line bg-raised sm:block" style={{ height }}>
+    <div className="relative" style={{ height: CONTENT_H }}>
+      <div className="sticky top-0 z-10 border-b border-line-strong bg-raised" style={{ height: RULER_H }} />
       <div className={row} style={{ top: ROWS.titles.top, height: ROWS.titles.h }}>
         <I.Text className="text-[13px]" /> Titles
       </div>
@@ -676,6 +774,7 @@ function TrackLabels() {
       <div className={row} style={{ top: ROWS.audio.top, height: ROWS.audio.h }}>
         <I.Wave className="text-[13px]" /> Audio
       </div>
+    </div>
     </div>
   );
 }
