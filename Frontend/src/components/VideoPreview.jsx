@@ -12,6 +12,8 @@ import { useSubtitleStore } from '../store/useSubtitleStore.js';
 import PreviewCanvas from './PreviewCanvas.jsx';
 import FormatPanel from './FormatPanel.jsx';
 import BrollPanel from './BrollPanel.jsx';
+import TitlePanel from './TitlePanel.jsx';
+import AudioPanel from './AudioPanel.jsx';
 import { ASPECTS } from '../lib/frame.js';
 
 /**
@@ -28,7 +30,15 @@ export default function VideoPreview() {
   const subtitlesOn = useSubtitleStore((s) => s.enabled);
   const subtitlePanelOpen = useSubtitleStore((s) => s.panelOpen);
   const [formatOpen, setFormatOpen] = useState(false);
-  const panelOpen = subtitlePanelOpen || formatOpen;
+  const [audioOpen, setAudioOpen] = useState(false);
+  const panelOpen = subtitlePanelOpen || formatOpen || audioOpen;
+  const hasMusic = useEditorStore((s) => Boolean(s.music));
+  // The top-right panels share one spot: opening one closes the others.
+  const openOnly = (which) => {
+    setFormatOpen(which === 'format');
+    setAudioOpen(which === 'audio');
+    useSubtitleStore.getState().setPanelOpen(which === 'subtitles');
+  };
   const aspect = useEditorStore((s) => s.frame.aspect);
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(1);
@@ -111,7 +121,9 @@ export default function VideoPreview() {
       <SubtitleCanvas videoRef={videoRef} onBackgroundClick={() => player.togglePlay()} />
       <SubtitlePanel />
       {formatOpen && <FormatPanel videoRef={videoRef} onClose={() => setFormatOpen(false)} />}
+      {audioOpen && <AudioPanel onClose={() => setAudioOpen(false)} />}
       <BrollPanel />
+      <TitlePanel />
 
       {/* Control bar */}
       <div
@@ -168,19 +180,15 @@ export default function VideoPreview() {
               onClick={() => {
                 const s = useSubtitleStore.getState();
                 if (!s.enabled) s.update({ enabled: true });
-                s.setPanelOpen(!s.panelOpen);
-                setFormatOpen(false);
+                openOnly(s.panelOpen ? null : 'subtitles');
               }}
-              active={panelOpen}
+              active={subtitlePanelOpen}
             >
               <span className="text-[13px] font-bold leading-none">Aa</span>
             </CtrlBtn>
             <CtrlBtn
               label="Aspect ratio and framing"
-              onClick={() => {
-                setFormatOpen(!formatOpen);
-                useSubtitleStore.getState().setPanelOpen(false);
-              }}
+              onClick={() => openOnly(formatOpen ? null : 'format')}
               active={formatOpen}
             >
               <span
@@ -190,6 +198,13 @@ export default function VideoPreview() {
               >
                 {aspect === 'original' ? 'RATIO' : ASPECTS.find((a) => a.id === aspect)?.label}
               </span>
+            </CtrlBtn>
+            <CtrlBtn
+              label="Background music (ducks under speech)"
+              onClick={() => openOnly(audioOpen ? null : 'audio')}
+              active={audioOpen}
+            >
+              <span className={`text-[15px] font-bold leading-none ${hasMusic ? 'text-scarlet-400' : ''}`}>♪</span>
             </CtrlBtn>
             <CtrlBtn label="Fullscreen" onClick={fullscreen}>
               <I.Expand />

@@ -63,6 +63,44 @@ Light and dark themes: toggle in the header. The choice is remembered per browse
 to the system setting. Colours are CSS variables in `src/index.css` (`--c-*`), used through
 Tailwind tokens such as `bg-surface`, `text-fg`, `border-line`.
 
+## Text titles
+
+Select words, then **Title** in the toolbar (or the T+ button on the timeline). The title starts
+with the selected words as its text and opens the Title panel at the preview's top-left:
+
+- **Text** (Enter for a new line), **Style** (Headline, Lower third, Boxed, Minimal),
+  **Colour** (the lower-third bar and the boxed background; text on light colours turns dark
+  automatically), **Position** (top, centre, bottom, lower left), **Size**, and
+  **Animation** in (pop, slide, fade or none; everything fades out).
+- A **Titles** row on the timeline: click a title to edit it, Delete to remove it.
+- Same model as B-roll: anchored to words (follows edits), output time, one title at a time
+  (a new one replaces any it overlaps), undoable, not saved with cloud projects yet. Long titles
+  shrink to fit the frame.
+- Drawn by `drawTitle()` (`src/lib/titles.js`) in the preview and in every exported frame, above
+  the B-roll and below the subtitles.
+
+## Background music and audio ducking
+
+**♪** in the preview's control bar opens the Music panel. Add a track (MP3, WAV, M4A, AAC, OGG,
+or a video's sound) and it plays under the whole edited video:
+
+- **Ducking, keyed to the transcript:** the music lowers itself while words are spoken and comes
+  back up in the pauses. "Speech" is the kept words mapped to output time, so cutting a sentence
+  also removes its dip. Settings: on/off and how much (4–30 dB). Ramps: 0.15 s down before a word,
+  0.4 s back up after; words closer than 0.35 s count as one phrase, so the music doesn't pump.
+- **Volume**, **Start music at**, **Loop if the video is longer**; a 0.5 s fade in at the start
+  and 1.5 s fade out at the end.
+- A **Music** row on the timeline draws the actual volume curve, so you can see each dip.
+- The music runs on **output time**, like B-roll: it plays straight through cuts.
+
+How it works (`src/lib/ducking.js`): `speechIntervals()` → `duckFactor()` / `musicGain()`. The
+preview (`media/musicPreview.js`) sets a hidden `<audio>` element's volume from `musicGain()` every
+frame. The exporter (`media/musicMix.js`) decodes just the part of the music the edit needs with
+mediabunny, then mixes it into each block of main audio with the same gain (computed at both ends
+of each ~20 ms block and blended), clamped so it never clips. Music is a setting like framing:
+not part of undo and not saved with cloud projects yet. It needs the main video to have a sound
+track.
+
 ## B-roll
 
 Select words (transcript, word chips, or a range on the timeline), then **B-roll** in the
@@ -212,9 +250,10 @@ deliberately not part of this feature.
 2. For each kept range, decode video frames and audio samples separately (WebCodecs via mediabunny).
 3. Rebase timestamps: both tracks share one running offset, so the output is continuous and in sync.
 4. Video frames are drawn onto an OffscreenCanvas of the output size, framed by `drawFramed()` (aspect ratio, crop or
-   fit), then encoded. Subtitles (when on) are drawn on each frame with the same `drawCaption()` the preview uses.
-   Titles and b-roll will be drawn here later.
-5. Audio is trimmed to the exact sample at each cut, with a 5 ms fade so cuts don't click.
+   fit), then B-roll (`drawBroll()`), the title (`drawTitle()`) and subtitles (`drawCaption()`) are drawn on top, with
+   the same functions the preview uses, then encoded.
+5. Audio is trimmed to the exact sample at each cut, with a 5 ms fade so cuts don't click. Background music (when
+   added) is mixed in with the ducking curve before encoding.
 6. Mux to MP4 and download. Codec choice: H.264 (falls back to VP9 / AV1), AAC (falls back to Opus).
 
 ## How the code is organised

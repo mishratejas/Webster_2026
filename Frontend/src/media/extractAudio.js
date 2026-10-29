@@ -1,4 +1,4 @@
-// Read a video file's metadata and pull its audio out as 16 kHz mono (FR-1).
+ // Read a video file's metadata and pull its audio out as 16 kHz mono (FR-1).
 //
 // Phase 1 approach: let the browser decode the whole file with decodeAudioData.
 // An OfflineAudioContext at 16 kHz resamples for us. This holds the file in memory,

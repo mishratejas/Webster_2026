@@ -33,6 +33,9 @@ import { drawCaption, findPageAt } from '../lib/captions.js';
 import { getCaptionStyle } from '../lib/captionStyles.js';
 import { drawFramed, outputSize } from '../lib/frame.js';
 import { createBrollRenderer } from './brollExport.js';
+import { createMusicMixer } from './musicMix.js';
+import { brollAt } from '../lib/overlays.js';
+import { drawTitle } from '../lib/titles.js';
 
 const FADE_S = 0.005; // audio fade at every cut edge
 
@@ -41,10 +44,12 @@ const FADE_S = 0.005; // audio fade at every cut edge
  *           captions?: { pages, styleId, settings } | null }} opts
  *   captions: burned-in subtitles, drawn with the same drawCaption() the preview uses.
  *   frame: aspect ratio / crop / fit (lib/frame.js), drawn with the same drawFramed().
- *   overlays: B-roll { items (resolved, output-timed), media: { id: { kind, file, duration } } }.
+ *   overlays: B-roll { items (resolved, output-timed), media: { id: { kind, file, duration } } }
+ *             and titles (resolved, output-timed).
+ *   music: background music { file, settings, duration, speech, total }, ducked under speech.
  * @returns {Promise<{ buffer: ArrayBuffer, videoCodec: string, audioCodec: string|null, width: number, height: number }>}
  */
-export async function exportVideo({ file, edl, onProgress, captions = null, frame = null, overlays = null }) {
+export async function exportVideo({ file, edl, onProgress, captions = null, frame = null, overlays = null, music = null }) {
   if (!edl.length) throw new Error('Nothing to export: everything has been cut.');
 
   const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
@@ -94,19 +99,23 @@ export async function exportVideo({ file, edl, onProgress, captions = null, fram
 
   const captionStyle = captions?.pages?.length ? getCaptionStyle(captions.styleId) : null;
   const broll = await createBrollRenderer(overlays);
+  const titles = overlays?.titles ?? [];
+  // Music is mixed into the main soundtrack, so it needs one (rare: a video without sound).
+  const mixer = audioSource ? await createMusicMixer(music) : null;
 
   /**
-   * One output frame: the framed video picture, then B-roll, then subtitles on top.
+   * One output frame: the framed video picture, then B-roll, the title, and subtitles on top.
    * t = source time (subtitles are timed in source seconds), T = output time (B-roll).
    */
   const drawFrame = async (frameCanvas, t, T) => {
     drawFramed(ctx, frameCanvas, frameCanvas.width, frameCanvas.height, frame, width, height);
     if (broll) await broll.draw(ctx, T, width, height);
+    const title = titles.length ? brollAt(titles, T) : null;
+    if (title) drawTitle(ctx, title, T, width, height);
     if (captionStyle) {
       const page = findPageAt(captions.pages, t);
       if (page) drawCaption(ctx, page, t, captionStyle, captions.settings, width, height);
     }
-    // Next: titles get drawn here.
   };
 
   const videoJob = async () => {
@@ -136,7 +145,7 @@ export async function exportVideo({ file, edl, onProgress, captions = null, fram
     for (const k of edl) {
       for await (const sample of sink.samples(k.start, k.end)) {
         try {
-          const trimmed = trimAudioSample(sample, k, offset);
+          const trimmed = trimAudioSample(sample, k, offset, mixer);
           if (trimmed) {
             await audioSource.add(trimmed);
             trimmed.close();
@@ -168,11 +177,16 @@ export async function exportVideo({ file, edl, onProgress, captions = null, fram
     height,
     subtitles: Boolean(captionStyle),
     brolls: overlays?.items?.length ?? 0,
+    titles: titles.length,
+    music: Boolean(mixer),
   };
 }
 
-/** Cut an AudioSample down to the kept range k, fade the edges, and rebase its timestamp. */
-function trimAudioSample(sample, k, offset) {
+/**
+ * Cut an AudioSample down to the kept range k, fade the edges, rebase its timestamp, and
+ * (with a music mixer) add the ducked background music under it.
+ */
+function trimAudioSample(sample, k, offset, mixer = null) {
   const { sampleRate: sr, numberOfChannels: ch, numberOfFrames: n, timestamp: ts } = sample;
   const first = Math.max(0, Math.ceil((k.start - ts) * sr));
   const last = Math.min(n, Math.floor((k.end - ts) * sr));
@@ -194,11 +208,14 @@ function trimAudioSample(sample, k, offset) {
     for (let c = 0; c < ch; c++) data[c * len + i] *= Math.max(0, gain);
   }
 
+  const T0 = offset + (ts + first / sr - k.start); // output time of the first kept frame
+  if (mixer) mixer.mix(data, ch, len, sr, T0); // music runs on output time, through the cuts
+
   return new AudioSample({
     data,
     format: 'f32-planar',
     numberOfChannels: ch,
     sampleRate: sr,
-    timestamp: offset + (ts + first / sr - k.start),
+    timestamp: T0,
   });
 }

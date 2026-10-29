@@ -16,6 +16,7 @@ self.onmessage = async ({ data }) => {
       captions: data.captions ?? null,
       frame: data.frame ?? null,
       overlays: data.overlays ?? null,
+      music: data.music ?? null,
       onProgress: (p) => {
         // Throttle: only post when progress moves by 0.5% or more.
         if (p - last >= 0.005 || p === 1) {

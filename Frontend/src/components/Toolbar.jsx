@@ -8,6 +8,7 @@ import * as I from './icons.jsx';
 import AccountMenu from '../account/AccountMenu.jsx';
 import { SaveProjectButton } from '../account/SaveControls.jsx';
 import { addBrollOverSelection, canAddBroll } from '../store/overlayActions.js';
+import { addTitleOverSelection, canAddTitle } from '../store/titleActions.js';
 
 const btn =
   'inline-flex h-9 items-center gap-1.5 rounded-xl px-3 text-sm font-medium text-muted transition-all duration-150 hover:bg-hover hover:text-fg active:scale-95 disabled:pointer-events-none disabled:opacity-35';
@@ -61,6 +62,14 @@ export default function Toolbar() {
           title="Add B-roll (video or image) over the selected words"
         >
           <I.Film /> <span className="hidden md:inline">B-roll</span>
+        </button>
+        <button
+          className={btn}
+          disabled={!canAddTitle(s)}
+          onClick={() => addTitleOverSelection()}
+          title="Add a text title over the selected words"
+        >
+          <I.Text /> <span className="hidden md:inline">Title</span>
         </button>
       </div>
 

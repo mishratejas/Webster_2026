@@ -9,6 +9,8 @@ import { gapCutTimes, splitTarget } from '../lib/transcript.js';
 import { resolveBrolls } from '../lib/overlays.js';
 import { useMediaStore } from '../store/useMediaStore.js';
 import { addBrollOverSelection, canAddBroll } from '../store/overlayActions.js';
+import { addTitleOverSelection, canAddTitle } from '../store/titleActions.js';
+import { speechIntervals, musicGain, musicTime } from '../lib/ducking.js';
 import { player } from '../media/player.js';
 import { deleteOrRestoreSelection, selectionIsRemoved } from './editActions.js';
 import * as I from './icons.jsx';
@@ -18,12 +20,14 @@ import { buildFillerCuts } from '../lib/fillers.js';
 const PAD = 16; // space before 0:00 and after the end
 const RULER_H = 28;
 const ROWS = {
-  broll: { top: 34, h: 26 },
-  caption: { top: 66, h: 30 },
-  video: { top: 102, h: 58 },
-  audio: { top: 166, h: 40 },
+  titles: { top: 32, h: 20 },
+  broll: { top: 56, h: 22 },
+  caption: { top: 82, h: 28 },
+  video: { top: 114, h: 52 },
+  audio: { top: 170, h: 34 },
+  music: { top: 208, h: 20 },
 };
-const CONTENT_H = 212;
+const CONTENT_H = 232;
 const MAX_PPS = 900; // max zoom: px per second
 
 // Razor cursor (scissors), with crosshair as the fallback.
@@ -445,7 +449,9 @@ export default function Timeline() {
 
             {duration > 0 && (
               <>
+                <TitleTrack xOf={xOf} winA={winA} winB={winB} />
                 <BrollTrack xOf={xOf} winA={winA} winB={winB} />
+                <MusicTrack xOf={xOf} tOf={tOf} winA={winA} winB={winB} />
                 <CaptionTrack items={items} ranges={ranges} xOf={xOf} winA={winA} winB={winB} zoom={zoom} tool={tool} />
                 <VideoTrack
                   ranges={ranges}
@@ -494,6 +500,99 @@ function roundRect(ctx, x, y, w, h, r) {
 }
 
 // ---------------------------------------------------------------------------
+
+/** Titles layer: one chip per title over the words it covers. Click to select / edit it. */
+function TitleTrack({ xOf, winA, winB }) {
+  const titles = useEditorStore((s) => s.titles);
+  const words = useEditorStore((s) => s.words);
+  const removedRanges = useEditorStore((s) => s.removedRanges);
+  const duration = useEditorStore((s) => s.duration);
+  const selectedId = useEditorStore((s) => s.selectedOverlayId);
+  const resolved = useMemo(() => resolveBrolls(titles, words, removedRanges, duration), [titles, words, removedRanges, duration]);
+  const { top, h } = ROWS.titles;
+  return resolved.map((t) => {
+    const a = xOf(t.srcStart);
+    const z = xOf(t.srcEnd);
+    if (z < winA || a > winB) return null;
+    return (
+      <button
+        key={t.id}
+        type="button"
+        tabIndex={-1}
+        title={`Title: ${t.text}`}
+        onPointerDown={(e) => {
+          if (e.button !== 0) return;
+          e.stopPropagation();
+          useEditorStore.getState().selectOverlay(t.id);
+          player.seek(t.srcStart);
+        }}
+        className={`absolute flex items-center gap-1 overflow-hidden whitespace-nowrap rounded-md px-1.5 text-left text-[10px] font-semibold text-white shadow ${
+          t.id === selectedId ? 'ring-2 ring-fg' : 'hover:brightness-110'
+        }`}
+        style={{ left: a + 1, width: Math.max(4, z - a - 2), top, height: h, background: 'linear-gradient(180deg, #f59e0b, #d97706)' }}
+      >
+        <span className="truncate">“{t.text.replace(/\n/g, ' ')}”</span>
+      </button>
+    );
+  });
+}
+
+/**
+ * Music row: the ducking curve over the source timeline (gaps where the video is cut),
+ * so you can see the music drop under each sentence.
+ */
+function MusicTrack({ xOf, tOf, winA, winB }) {
+  const music = useEditorStore((s) => s.music);
+  const words = useEditorStore((s) => s.words);
+  const removedRanges = useEditorStore((s) => s.removedRanges);
+  const duration = useEditorStore((s) => s.duration);
+  const media = useMediaStore((s) => (music ? s.media[music.mediaId] : null));
+  const { top, h } = ROWS.music;
+  const edl = useMemo(() => buildEDL(removedRanges, duration), [removedRanges, duration]);
+  const speech = useMemo(() => speechIntervals(words, removedRanges, duration), [words, removedRanges, duration]);
+
+  if (!music || !media) {
+    return (
+      <div className="pointer-events-none absolute flex items-center text-[11px] text-subtle" style={{ left: xOf(0) + 8, top, height: h }}>
+        Add background music from ♪ in the preview: it lowers itself under speech
+      </div>
+    );
+  }
+  const total = editedDuration(removedRanges, duration);
+  const x0 = Math.max(xOf(0), winA);
+  const x1 = Math.min(xOf(duration), winB);
+  let d = '';
+  let pen = false;
+  for (let x = x0; x <= x1; x += 3) {
+    const t = tOf(x);
+    if (findRangeAt(removedRanges, t)) {
+      pen = false;
+      continue;
+    }
+    const T = sourceToOutput(t, edl);
+    const g = musicTime(T, music, media.duration) === null ? 0 : musicGain(T, music, speech, total);
+    const y = top + h - 2 - g * (h - 4);
+    d += `${pen ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`;
+    pen = true;
+  }
+  return (
+    <>
+      <div
+        className="pointer-events-none absolute rounded-md bg-teal-500/15 ring-1 ring-inset ring-teal-500/30"
+        style={{ left: xOf(0), width: xOf(duration) - xOf(0), top, height: h }}
+      />
+      <svg className="pointer-events-none absolute left-0 top-0 overflow-visible" width="1" height="1">
+        <path d={d} fill="none" stroke="#14b8a6" strokeWidth="1.5" strokeLinejoin="round" />
+      </svg>
+      <span
+        className="pointer-events-none absolute truncate text-[10px] font-semibold text-teal-600 dark:text-teal-300"
+        style={{ left: Math.max(xOf(0), winA) + 6, top: top + 2, maxWidth: 220 }}
+      >
+        ♪ {media.name}
+      </span>
+    </>
+  );
+}
 
 /**
  * B-roll layer: one chip per overlay over the words it covers (source time, like every
@@ -559,6 +658,12 @@ function TrackLabels() {
   return (
     <div className="relative hidden w-[84px] shrink-0 border-r border-line bg-raised sm:block" style={{ height: CONTENT_H }}>
       <div className="absolute inset-x-0 top-0 border-b border-line-strong" style={{ height: RULER_H }} />
+      <div className={row} style={{ top: ROWS.titles.top, height: ROWS.titles.h }}>
+        <I.Text className="text-[13px]" /> Titles
+      </div>
+      <div className={row} style={{ top: ROWS.music.top, height: ROWS.music.h }}>
+        <span className="text-[13px] leading-none">♪</span> Music
+      </div>
       <div className={row} style={{ top: ROWS.broll.top, height: ROWS.broll.h }}>
         <I.Film className="text-[13px]" /> B-roll
       </div>
@@ -820,6 +925,7 @@ function TimelineToolbar({ zoom, fitPps, zoomTo, follow, setFollow, tool, setToo
   const span = useSelectionSpan();
   const restoring = useEditorStore((s) => selectionIsRemoved(s));
   const canAddBrollNow = useEditorStore((s) => canAddBroll(s));
+  const canAddTitleNow = useEditorStore((s) => canAddTitle(s));
 
   // Zoom slider is logarithmic between fit and max.
   const lo = Math.log(fitPps);
@@ -850,6 +956,12 @@ function TimelineToolbar({ zoom, fitPps, zoomTo, follow, setFollow, tool, setToo
       >
         <span className="relative">
           <I.Film />
+          <I.Plus className="absolute -bottom-1 -right-1.5 text-[10px]" />
+        </span>
+      </IconBtn>
+      <IconBtn label="Add a title over the selection" disabled={!canAddTitleNow} onClick={() => addTitleOverSelection()}>
+        <span className="relative">
+          <I.Text />
           <I.Plus className="absolute -bottom-1 -right-1.5 text-[10px]" />
         </span>
       </IconBtn>

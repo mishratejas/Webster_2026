@@ -7,6 +7,8 @@ import { useSubtitleStore } from '../store/useSubtitleStore.js';
 import { useCaptionPages } from '../store/useCaptionPages.js';
 import { useMediaStore } from '../store/useMediaStore.js';
 import { resolveBrolls } from '../lib/overlays.js';
+import { speechIntervals } from '../lib/ducking.js';
+import { editedDuration } from '../lib/edl.js';
 
 import * as I from './icons.jsx';
 
@@ -62,10 +64,24 @@ export default function ExportButton() {
       const m = library[it.mediaId];
       if (m) media[m.id] = { kind: m.kind, file: m.file, duration: Number.isFinite(m.duration) ? m.duration : null };
     }
-    const overlays = items.length ? { items, media } : null;
+    const titles = resolveBrolls(ed.titles, ed.words, ed.removedRanges, ed.duration).filter((t) => t.text.trim());
+    const overlays = items.length || titles.length ? { items, media, titles } : null;
+
+    // Background music: the file plus everything needed to duck it exactly as the preview does.
+    const musicMedia = ed.music ? library[ed.music.mediaId] : null;
+    const music = musicMedia
+      ? {
+          file: musicMedia.file,
+          settings: ed.music,
+          duration: musicMedia.duration,
+          speech: speechIntervals(ed.words, ed.removedRanges, ed.duration),
+          total: editedDuration(ed.removedRanges, ed.duration),
+        }
+      : null;
 
     const { promise, cancel } = runExport(file, edl, {
       overlays,
+      music,
       captions,
       frame: useEditorStore.getState().frame, // aspect ratio / crop / fit, as in the preview
       onProgress: (progress) => setJob({ phase: 'running', progress }),
@@ -126,6 +142,8 @@ export default function ExportButton() {
                   </li>
                   {job.info.subtitles && <li>Subtitles burned in</li>}
                   {job.info.brolls > 0 && <li>{job.info.brolls} B-roll {job.info.brolls === 1 ? 'clip' : 'clips'}</li>}
+                  {job.info.titles > 0 && <li>{job.info.titles} {job.info.titles === 1 ? 'title' : 'titles'}</li>}
+                  {job.info.music && <li>Music mixed in, ducked under speech</li>}
                   <li>
                     Rendered in {job.seconds.toFixed(1)} s ({(job.outLength / job.seconds).toFixed(1)}× real time)
                   </li>

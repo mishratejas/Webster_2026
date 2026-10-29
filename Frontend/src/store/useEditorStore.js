@@ -12,6 +12,13 @@ import { FRAME_DEFAULTS, clampFrame } from '../lib/frame.js';
 
 const HISTORY_LIMIT = 200;
 
+/**
+ * Edit layers besides removedRanges. Each has `<layer>Past` / `<layer>Future` stacks that
+ * move in step with past / future, so one undo step restores everything an edit changed.
+ */
+const LAYERS = ['splits', 'brolls', 'titles'];
+const emptyLayers = () => Object.fromEntries(LAYERS.flatMap((k) => [[k, []], [`${k}Past`, []], [`${k}Future`, []]]));
+
 /** Transcript items for the current edit state: gaps are divided at razor marks and cut edges. */
 const deriveItems = (words, gaps, removedRanges, splits) =>
   buildTranscriptItems(words, gaps, gapCutTimes(splits, removedRanges));
@@ -53,7 +60,16 @@ const initialState = {
   brolls: [],
   brollsPast: [],
   brollsFuture: [],
+  // Text overlays (lib/titles.js), same anchoring and history as B-roll.
+  titles: [],
+  titlesPast: [],
+  titlesFuture: [],
+  // The selected B-roll or title (ids are unique across both), or null.
   selectedOverlayId: null,
+
+  // Background music with ducking (lib/ducking.js): null | { mediaId, volume, duck, duckDb,
+  // loop, offset }. A setting like framing: per video, not part of undo or saved projects.
+  music: null,
 
   // timeline visuals (derived from the media, not edit state)
   peaks: null, // Float32Array, 0..1 loudness per 10 ms
@@ -98,12 +114,7 @@ export const useEditorStore = create((set, get) => ({
       removedRanges: [],
       past: [],
       future: [],
-      splits: [],
-      splitsPast: [],
-      splitsFuture: [],
-      brolls: [],
-      brollsPast: [],
-      brollsFuture: [],
+      ...emptyLayers(),
       selectedOverlayId: null,
       selection: null,
       fillerReview: null,
@@ -130,32 +141,28 @@ export const useEditorStore = create((set, get) => ({
   },
 
   /**
-   * Replace removedRanges (and optionally splits / B-roll) and record history. Every
-   * edit goes through here, so one undo step covers whatever the edit changed.
+   * Replace removedRanges (and optionally other layers: { splits, brolls, titles }) and
+   * record history. Every edit goes through here, so one undo step covers whatever the
+   * edit changed.
    */
-  commit: (next, nextSplits, nextBrolls) => {
-    const { removedRanges, past, splits, splitsPast, brolls, brollsPast } = get();
-    get()._apply({
-      removedRanges: next,
-      splits: nextSplits ?? splits,
-      brolls: nextBrolls ?? brolls,
-      past: [...past, removedRanges].slice(-HISTORY_LIMIT),
-      splitsPast: [...alignSplits(splitsPast, past.length), splits].slice(-HISTORY_LIMIT),
-      brollsPast: [...alignSplits(brollsPast, past.length), brolls].slice(-HISTORY_LIMIT),
-      future: [],
-      splitsFuture: [],
-      brollsFuture: [],
-    });
-  },
-
-  /** Change the B-roll list as one undoable edit (cuts and splits unchanged). */
-  commitBrolls: (nextBrolls) => {
+  commit: (next, layers = {}) => {
     const s = get();
-    s.commit(s.removedRanges, s.splits, nextBrolls);
-    if (s.selectedOverlayId && !nextBrolls.some((b) => b.id === s.selectedOverlayId)) set({ selectedOverlayId: null });
+    const patch = { removedRanges: next, past: [...s.past, s.removedRanges].slice(-HISTORY_LIMIT), future: [] };
+    for (const k of LAYERS) {
+      patch[k] = layers[k] ?? s[k];
+      patch[`${k}Past`] = [...alignStack(s[`${k}Past`], s.past.length), s[k]].slice(-HISTORY_LIMIT);
+      patch[`${k}Future`] = [];
+    }
+    get()._apply(patch);
+    get()._dropStaleOverlaySelection();
   },
 
-  /** Select a B-roll (clears the word selection). null deselects. */
+  /** Change the B-roll list as one undoable edit (cuts and other layers unchanged). */
+  commitBrolls: (brolls) => get().commit(get().removedRanges, { brolls }),
+  /** Change the title list as one undoable edit. */
+  commitTitles: (titles) => get().commit(get().removedRanges, { titles }),
+
+  /** Select a B-roll or title (clears the word selection). null deselects. */
   selectOverlay: (id) => set({ selectedOverlayId: id, ...(id ? { selection: null, selectionRange: null } : {}) }),
 
   removeRange: (range) => get().commit(addRange(get().removedRanges, range)),
@@ -168,7 +175,7 @@ export const useEditorStore = create((set, get) => ({
   addSplit: (t) => {
     const { gaps, removedRanges, splits } = get();
     if (!splitTarget(t, gaps, gapCutTimes(splits, removedRanges))) return false;
-    get().commit(removedRanges, [...splits, t].sort((a, b) => a - b));
+    get().commit(removedRanges, { splits: [...splits, t].sort((a, b) => a - b) });
     set({ selection: null, selectionRange: null });
     return true;
   },
@@ -176,44 +183,36 @@ export const useEditorStore = create((set, get) => ({
   undo: () => {
     const s = get();
     if (!s.past.length) return;
-    const sp = alignSplits(s.splitsPast, s.past.length);
-    const bp = alignSplits(s.brollsPast, s.past.length);
-    get()._apply({
-      removedRanges: s.past[s.past.length - 1],
-      splits: sp[sp.length - 1],
-      brolls: bp[bp.length - 1],
-      past: s.past.slice(0, -1),
-      splitsPast: sp.slice(0, -1),
-      brollsPast: bp.slice(0, -1),
-      future: [s.removedRanges, ...s.future],
-      splitsFuture: [s.splits, ...alignSplits(s.splitsFuture, s.future.length)],
-      brollsFuture: [s.brolls, ...alignSplits(s.brollsFuture, s.future.length)],
-    });
+    const patch = { removedRanges: s.past[s.past.length - 1], past: s.past.slice(0, -1), future: [s.removedRanges, ...s.future] };
+    for (const k of LAYERS) {
+      const p = alignStack(s[`${k}Past`], s.past.length);
+      patch[k] = p[p.length - 1];
+      patch[`${k}Past`] = p.slice(0, -1);
+      patch[`${k}Future`] = [s[k], ...alignStack(s[`${k}Future`], s.future.length)];
+    }
+    get()._apply(patch);
     get()._dropStaleOverlaySelection();
   },
 
   redo: () => {
     const s = get();
     if (!s.future.length) return;
-    const sf = alignSplits(s.splitsFuture, s.future.length);
-    const bf = alignSplits(s.brollsFuture, s.future.length);
-    get()._apply({
-      removedRanges: s.future[0],
-      splits: sf[0],
-      brolls: bf[0],
-      past: [...s.past, s.removedRanges],
-      splitsPast: [...alignSplits(s.splitsPast, s.past.length), s.splits],
-      brollsPast: [...alignSplits(s.brollsPast, s.past.length), s.brolls],
-      future: s.future.slice(1),
-      splitsFuture: sf.slice(1),
-      brollsFuture: bf.slice(1),
-    });
+    const patch = { removedRanges: s.future[0], past: [...s.past, s.removedRanges], future: s.future.slice(1) };
+    for (const k of LAYERS) {
+      const f = alignStack(s[`${k}Future`], s.future.length);
+      patch[k] = f[0];
+      patch[`${k}Past`] = [...alignStack(s[`${k}Past`], s.past.length), s[k]];
+      patch[`${k}Future`] = f.slice(1);
+    }
+    get()._apply(patch);
     get()._dropStaleOverlaySelection();
   },
 
   _dropStaleOverlaySelection: () => {
-    const { selectedOverlayId, brolls } = get();
-    if (selectedOverlayId && !brolls.some((b) => b.id === selectedOverlayId)) set({ selectedOverlayId: null });
+    const { selectedOverlayId, brolls, titles } = get();
+    if (selectedOverlayId && !brolls.some((b) => b.id === selectedOverlayId) && !titles.some((t) => t.id === selectedOverlayId)) {
+      set({ selectedOverlayId: null });
+    }
   },
 
   /** Put saved edits back (opening a saved project). Razor marks aren't saved, so they start empty. */
@@ -222,12 +221,7 @@ export const useEditorStore = create((set, get) => ({
       removedRanges,
       past,
       future,
-      splits: [],
-      splitsPast: past.map(() => []),
-      splitsFuture: future.map(() => []),
-      brolls: [],
-      brollsPast: past.map(() => []),
-      brollsFuture: future.map(() => []),
+      ...Object.fromEntries(LAYERS.flatMap((k) => [[k, []], [`${k}Past`, past.map(() => [])], [`${k}Future`, future.map(() => [])]])),
     });
   },
 
@@ -237,6 +231,13 @@ export const useEditorStore = create((set, get) => ({
   setFillerReview: (fillerReview) => set({ fillerReview }),
   addThumbnail: (thumb) =>
     set({ thumbnails: [...get().thumbnails, thumb].sort((a, b) => a.t - b.t) }),
+
+  // ---- music (not undoable, like framing) ----
+  setMusic: (music) => set({ music }),
+  updateMusic: (patch) => {
+    const m = get().music;
+    if (m) set({ music: { ...m, ...patch } });
+  },
 
   // ---- framing ----
   setFrame: (patch) => {
@@ -264,7 +265,7 @@ export const useEditorStore = create((set, get) => ({
  * Keep splitsPast / brollsPast (and the futures) the same length as past / future. They
  * can only drift if something sets past/future directly; missing entries mean "none".
  */
-function alignSplits(stack, length) {
+function alignStack(stack, length) {
   if (stack.length === length) return stack;
   if (stack.length > length) return stack.slice(stack.length - length);
   return [...Array(length - stack.length).fill([]), ...stack];
